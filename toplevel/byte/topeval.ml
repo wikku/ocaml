@@ -96,6 +96,7 @@ let load_lambda ppf lam =
     record_backtrace ();
     toplevel_value_bindings := initial_bindings; (* PR#6211 *)
     Symtable.restore_state initial_symtable;
+    if x = Out_of_memory then Gc.full_major();
     Exception x
 
 (* Print the outcome of an evaluation *)
@@ -108,6 +109,32 @@ let pr_item =
                   val_type)
       | _ -> None
     )
+
+let out_phrase_of_result print_outcome str oldenv newenv sg' = function
+ | Result v ->
+     if print_outcome then
+       Printtyp.wrap_printing_env ~error:false oldenv (fun () ->
+         match str.str_items with
+         | [ { str_desc =
+                 (Tstr_eval (exp, _)
+                 |Tstr_value
+                     (Asttypes.Nonrecursive,
+                      [{vb_pat = {pat_desc=Tpat_any};
+                        vb_expr = exp}
+                      ]
+                     )
+                 )
+             }
+           ] ->
+             let outv = outval_of_value newenv v exp.exp_type in
+             let ty = Printtyp.tree_of_type_scheme exp.exp_type in
+             Ophr_eval (outv, ty)
+         | [] -> Ophr_signature []
+         | _ -> Ophr_signature (pr_item oldenv sg'))
+     else Ophr_signature []
+ | Exception exn ->
+     let outv = outval_of_value oldenv (Obj.repr exn) Predef.type_exn in
+     Ophr_exception (exn, outv)
 
 (* Execute a toplevel phrase *)
 
@@ -126,58 +153,25 @@ let execute_phrase print_outcome ppf phr =
       Typecore.force_delayed_checks ();
       let lam = Translmod.transl_toplevel_definition str in
       Warnings.check_fatal ();
-      begin try
-        toplevel_env := newenv;
-        let res = load_lambda ppf lam in
-        let out_phr =
-          match res with
-          | Result v ->
-              if print_outcome then
-                Printtyp.wrap_printing_env ~error:false oldenv (fun () ->
-                  match str.str_items with
-                  | [ { str_desc =
-                          (Tstr_eval (exp, _)
-                          |Tstr_value
-                              (Asttypes.Nonrecursive,
-                               [{vb_pat = {pat_desc=Tpat_any};
-                                 vb_expr = exp}
-                               ]
-                              )
-                          )
-                      }
-                    ] ->
-                      let outv = outval_of_value newenv v exp.exp_type in
-                      let ty = Printtyp.tree_of_type_scheme exp.exp_type in
-                      Ophr_eval (outv, ty)
-
-                  | [] -> Ophr_signature []
-                  | _ -> Ophr_signature (pr_item oldenv sg'))
-              else Ophr_signature []
-          | Exception exn ->
-              toplevel_env := oldenv;
-              if exn = Out_of_memory then Gc.full_major();
-              let outv =
-                outval_of_value !toplevel_env (Obj.repr exn) Predef.type_exn
-              in
-              Ophr_exception (exn, outv)
-        in
-        !print_out_phrase ppf out_phr;
-        if Printexc.backtrace_status ()
-        then begin
-          match !backtrace with
-            | None -> ()
-            | Some b ->
-                pp_print_string ppf b;
-                pp_print_flush ppf ();
-                backtrace := None;
-        end;
-        begin match out_phr with
-        | Ophr_eval (_, _) | Ophr_signature _ -> true
-        | Ophr_exception _ -> false
-        end
-      with x ->
-        toplevel_env := oldenv; raise x
-      end
+      let res = load_lambda ppf lam in
+      let out_phr =
+        out_phrase_of_result print_outcome str oldenv newenv sg' res;
+      in
+      !print_out_phrase ppf out_phr;
+      if Printexc.backtrace_status ()
+      then begin
+        match !backtrace with
+          | None -> ()
+          | Some b ->
+              pp_print_string ppf b;
+              pp_print_flush ppf ();
+              backtrace := None;
+      end;
+      begin match res with Result _ -> toplevel_env := newenv | _ -> () end;
+      begin match out_phr with
+      | Ophr_eval (_, _) | Ophr_signature _ -> true
+      | Ophr_exception _ -> false
+      end;
   | Ptop_dir {pdir_name = {Location.txt = dir_name}; pdir_arg } ->
       try_run_directive ppf dir_name pdir_arg
 
