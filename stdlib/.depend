@@ -59,6 +59,14 @@ stdlib__Bool.cmx : bool.ml \
     stdlib.cmx \
     stdlib__Bool.cmi
 stdlib__Bool.cmi : bool.mli
+stdlib__Break.cmo : break.ml \
+    stdlib__EffectHandlers.cmi \
+    stdlib__Break.cmi
+stdlib__Break.cmx : break.ml \
+    stdlib__EffectHandlers.cmx \
+    stdlib__Break.cmi
+stdlib__Break.cmi : break.mli \
+    stdlib__EffectHandlers.cmi
 stdlib__Buffer.cmo : buffer.ml \
     stdlib__Sys.cmi \
     stdlib__String.cmi \
