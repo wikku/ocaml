@@ -143,8 +143,10 @@ let find line_number start_char str =
     match expr.exp_desc with
     | Texp_apply (_, [_, Some arg]) when
         let loc = expr.exp_loc.loc_start in
-        Printf.printf "iter %d %d %d\n" loc.pos_lnum loc.pos_cnum loc.pos_bol;
-        loc.pos_lnum = line_number
+        (* Printf.printf "iter %d %d %d\n" loc.pos_lnum loc.pos_cnum loc.pos_bol; *)
+        (* line numbers are sometimes off,
+           don't have breaks too near each other *)
+        abs(loc.pos_lnum - line_number) <= 1
         && loc.pos_cnum - loc.pos_bol = start_char
         -> raise (Found arg)
     | _ -> Tast_iterator.default_iterator.expr it expr }
@@ -179,14 +181,14 @@ let break_handler oldenv str =
       match e with
       | Break.Break bl -> Some (fun (k : (a,_) Eh.Deep.continuation) ->
           let cs = Eh.Deep.get_callstack k 2 in
-          Printexc.print_raw_backtrace stdout cs;
+          (* Printexc.print_raw_backtrace stdout cs; *)
           match Printexc.backtrace_slots cs with
           | None -> failwith "Breakpoint hit; cannot find backtrace"
           | Some arr ->
           match Printexc.Slot.location arr.(1) (* callsite of break *) with
           | None -> failwith "Breakpoint hit; cannot obtain file location"
           | Some { line_number; start_char } ->
-          Printf.printf "ln=%d; sc=%d\n" line_number start_char;
+          (* Printf.printf "ln=%d; sc=%d\n" line_number start_char; *)
           match find (line_number) start_char str with
           | None -> failwith "Breakpoint hit; cannot find matching call"
           | Some source_args ->
@@ -198,7 +200,7 @@ let break_handler oldenv str =
           let extensions = List.map2 zip_fun bl source_args in
           (* we assume the return type of the continuation (i.e. the type of
              the expression wrapped in try_with) is bool *)
-          let k = (fun () -> toplevel_env := oldenv; Eh.Deep.continue k ()) in
+          let k = (fun () -> Eh.Deep.continue k ()) in
           let k_type =
             newty2 ~level:Btype.generic_level
               (Tarrow (Nolabel, Predef.type_unit, Predef.type_bool, commu_ok))
@@ -242,7 +244,7 @@ let execute_phrase print_outcome ppf phr =
                 pp_print_flush ppf ();
                 backtrace := None;
         end;
-        Printf.printf " normal return\n";
+        (* Printf.printf " normal return\n"; *)
         begin match res with Result _ -> toplevel_env := newenv | _ -> () end;
         begin match out_phr with
         | Ophr_eval (_, _) | Ophr_signature _ -> true
