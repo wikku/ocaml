@@ -23,6 +23,7 @@ open Typedtree
 open Outcometree
 open Topcommon
 module String = Misc.Stdlib.String
+module Eh = EffectHandlers
 
 (* The table of toplevel value bindings and its accessors *)
 
@@ -136,6 +137,79 @@ let out_phrase_of_result print_outcome str oldenv newenv sg' = function
      let outv = outval_of_value oldenv (Obj.repr exn) Predef.type_exn in
      Ophr_exception (exn, outv)
 
+let find line_number start_char str =
+  let exception Found of expression in
+  let iterator = { Tast_iterator.default_iterator with expr = fun it expr ->
+    match expr.exp_desc with
+    | Texp_apply (_, [_, Some arg]) when
+        let loc = expr.exp_loc.loc_start in
+        Printf.printf "iter %d %d %d\n" loc.pos_lnum loc.pos_cnum loc.pos_bol;
+        loc.pos_lnum = line_number
+        && loc.pos_cnum - loc.pos_bol = start_char
+        -> raise (Found arg)
+    | _ -> Tast_iterator.default_iterator.expr it expr }
+  in
+  let rec traverse_conses = function
+    | Texp_construct (_, _, [arg1; arg2]) ->
+      (match arg1.exp_desc with
+       | Texp_tuple [fst; snd] ->
+         (match fst.exp_desc with
+          | Texp_constant (Const_string (name, _, _)) ->
+           (name, snd.exp_type) :: traverse_conses arg2.exp_desc
+          | _ -> failwith "traverse_conses2")
+       | _ -> failwith "traverse_conses1")
+    | Texp_construct (_, _, []) -> []
+    | _ -> failwith "traverse_conses"
+  in
+  match iterator.structure iterator str with
+  | () -> None
+  | exception (Found expr) -> Some (traverse_conses expr.exp_desc)
+
+let extend extensions env =
+  List.iter (fun (name, value, _) -> setvalue name value) extensions;
+  List.fold_left
+    (fun env' (name, _, typ) ->
+      Env.add_value (Ident.create_local name)
+        { val_type=typ; val_kind=Val_reg; val_loc=Location.none;
+          val_attributes=[]; val_uid=Uid.internal_not_actually_unique } env')
+    env extensions
+
+let break_handler oldenv str =
+  { Eh.Deep.effc = fun (type a) (e : a Eh.eff) ->
+      match e with
+      | Break.Break bl -> Some (fun (k : (a,_) Eh.Deep.continuation) ->
+          let cs = Eh.Deep.get_callstack k 2 in
+          Printexc.print_raw_backtrace stdout cs;
+          match Printexc.backtrace_slots cs with
+          | None -> failwith "Breakpoint hit; cannot find backtrace"
+          | Some arr ->
+          match Printexc.Slot.location arr.(1) (* callsite of break *) with
+          | None -> failwith "Breakpoint hit; cannot obtain file location"
+          | Some { line_number; start_char } ->
+          Printf.printf "ln=%d; sc=%d\n" line_number start_char;
+          match find (line_number) start_char str with
+          | None -> failwith "Breakpoint hit; cannot find matching call"
+          | Some source_args ->
+          let bl = Break.list_of_breaklist bl in
+          let zip_fun (name, value) (name', typ) =
+            assert (name = name');
+            (name, value, typ)
+          in
+          let extensions = List.map2 zip_fun bl source_args in
+          (* we assume the return type of the continuation (i.e. the type of
+             the expression wrapped in try_with) is bool *)
+          let k = (fun () -> toplevel_env := oldenv; Eh.Deep.continue k ()) in
+          let k_type =
+            newty2 ~level:Btype.generic_level
+              (Tarrow (Nolabel, Predef.type_unit, Predef.type_bool, commu_ok))
+          in
+          let extensions = ("k", Obj.repr k, k_type) :: extensions in
+          toplevel_env := extend extensions oldenv;
+          true;
+          (* pr_item oldenv (lets_of_extensions extensions) *)
+          )
+      | _ -> None }
+
 (* Execute a toplevel phrase *)
 
 let execute_phrase print_outcome ppf phr =
@@ -153,25 +227,28 @@ let execute_phrase print_outcome ppf phr =
       Typecore.force_delayed_checks ();
       let lam = Translmod.transl_toplevel_definition str in
       Warnings.check_fatal ();
-      let res = load_lambda ppf lam in
-      let out_phr =
-        out_phrase_of_result print_outcome str oldenv newenv sg' res;
-      in
-      !print_out_phrase ppf out_phr;
-      if Printexc.backtrace_status ()
-      then begin
-        match !backtrace with
-          | None -> ()
-          | Some b ->
-              pp_print_string ppf b;
-              pp_print_flush ppf ();
-              backtrace := None;
-      end;
-      begin match res with Result _ -> toplevel_env := newenv | _ -> () end;
-      begin match out_phr with
-      | Ophr_eval (_, _) | Ophr_signature _ -> true
-      | Ophr_exception _ -> false
-      end;
+      Eh.Deep.try_with (fun () ->
+        let res = load_lambda ppf lam in
+        let out_phr =
+          out_phrase_of_result print_outcome str oldenv newenv sg' res;
+        in
+        !print_out_phrase ppf out_phr;
+        if Printexc.backtrace_status ()
+        then begin
+          match !backtrace with
+            | None -> ()
+            | Some b ->
+                pp_print_string ppf b;
+                pp_print_flush ppf ();
+                backtrace := None;
+        end;
+        Printf.printf " normal return\n";
+        begin match res with Result _ -> toplevel_env := newenv | _ -> () end;
+        begin match out_phr with
+        | Ophr_eval (_, _) | Ophr_signature _ -> true
+        | Ophr_exception _ -> false
+        end) ()
+      (break_handler oldenv str)
   | Ptop_dir {pdir_name = {Location.txt = dir_name}; pdir_arg } ->
       try_run_directive ppf dir_name pdir_arg
 
